@@ -143,6 +143,29 @@ shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
 
 ros::Publisher pub_signal;
+ros::Publisher pubImuPropOdom;
+
+/*** IMU propagation state for high-frequency pose output ***/
+struct ImuPropState {
+    M3D rot = M3D::Identity();
+    V3D pos = V3D::Zero();
+    V3D vel = V3D::Zero();
+    V3D ba  = V3D::Zero();
+    V3D bg  = V3D::Zero();
+    V3D grav = V3D(0, 0, -G_m_s2);
+};
+
+mutex mtx_imu_prop;
+bool imu_prop_enable = false;
+bool state_update_flg = false;
+bool new_imu_flag = false;
+bool ekf_finish_once = false;
+ImuPropState imu_propagate;
+ImuPropState latest_ekf_state;
+double latest_ekf_time = 0;
+sensor_msgs::Imu newest_imu;
+deque<sensor_msgs::Imu> prop_imu_buffer;
+nav_msgs::Odometry imu_prop_odom;
 
 void SigHandle(int sig)
 {
@@ -365,6 +388,89 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     imu_buffer.push_back(msg);
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+
+    /*** Store IMU for propagation ***/
+    mtx_imu_prop.lock();
+    newest_imu = *msg;
+    prop_imu_buffer.push_back(*msg);
+    new_imu_flag = true;
+    mtx_imu_prop.unlock();
+}
+
+void prop_imu_once(ImuPropState &state, double dt, V3D acc_avr, V3D angvel_avr) {
+    if (dt <= 0 || dt > 0.5) return;
+    double mean_acc_norm = p_imu->get_mean_acc_norm();
+    acc_avr = acc_avr * G_m_s2 / mean_acc_norm - state.ba;
+    angvel_avr -= state.bg;
+    M3D Exp_f = Exp(angvel_avr, dt);
+    /* propagation of IMU attitude */
+    state.rot = state.rot * Exp_f;
+    /* specific acceleration (global frame) */
+    V3D acc_global = state.rot * acc_avr + state.grav;
+    /* propagation of position */
+    state.pos = state.pos + state.vel * dt + 0.5 * acc_global * dt * dt;
+    /* propagation of velocity */
+    state.vel = state.vel + acc_global * dt;
+}
+
+void imu_prop_callback(const ros::TimerEvent &e) {
+    if (!p_imu->imu_init_done() || !new_imu_flag || !ekf_finish_once) {
+        return;
+    }
+    mtx_imu_prop.lock();
+    new_imu_flag = false;
+    if (imu_prop_enable && !prop_imu_buffer.empty()) {
+        static double last_t_from_ekf = 0;
+        if (state_update_flg) {
+            imu_propagate = latest_ekf_state;
+            // drop IMU messages before the latest EKF time
+            while (!prop_imu_buffer.empty() && prop_imu_buffer.front().header.stamp.toSec() < latest_ekf_time) {
+                prop_imu_buffer.pop_front();
+            }
+            last_t_from_ekf = 0;
+            for (size_t i = 0; i < prop_imu_buffer.size(); i++) {
+                double t_from_ekf = prop_imu_buffer[i].header.stamp.toSec() - latest_ekf_time;
+                double dt = t_from_ekf - last_t_from_ekf;
+                V3D acc_imu(prop_imu_buffer[i].linear_acceleration.x,
+                            prop_imu_buffer[i].linear_acceleration.y,
+                            prop_imu_buffer[i].linear_acceleration.z);
+                V3D omg_imu(prop_imu_buffer[i].angular_velocity.x,
+                            prop_imu_buffer[i].angular_velocity.y,
+                            prop_imu_buffer[i].angular_velocity.z);
+                prop_imu_once(imu_propagate, dt, acc_imu, omg_imu);
+                last_t_from_ekf = t_from_ekf;
+            }
+            state_update_flg = false;
+        } else {
+            V3D acc_imu(newest_imu.linear_acceleration.x,
+                        newest_imu.linear_acceleration.y,
+                        newest_imu.linear_acceleration.z);
+            V3D omg_imu(newest_imu.angular_velocity.x,
+                        newest_imu.angular_velocity.y,
+                        newest_imu.angular_velocity.z);
+            double t_from_ekf = newest_imu.header.stamp.toSec() - latest_ekf_time;
+            double dt = t_from_ekf - last_t_from_ekf;
+            prop_imu_once(imu_propagate, dt, acc_imu, omg_imu);
+            last_t_from_ekf = t_from_ekf;
+        }
+
+        Eigen::Quaterniond q(imu_propagate.rot);
+        imu_prop_odom.header.frame_id = "map";
+        imu_prop_odom.header.stamp = newest_imu.header.stamp;
+        imu_prop_odom.child_frame_id = "imu_propagate";
+        imu_prop_odom.pose.pose.position.x = imu_propagate.pos.x();
+        imu_prop_odom.pose.pose.position.y = imu_propagate.pos.y();
+        imu_prop_odom.pose.pose.position.z = imu_propagate.pos.z();
+        imu_prop_odom.pose.pose.orientation.w = q.w();
+        imu_prop_odom.pose.pose.orientation.x = q.x();
+        imu_prop_odom.pose.pose.orientation.y = q.y();
+        imu_prop_odom.pose.pose.orientation.z = q.z();
+        imu_prop_odom.twist.twist.linear.x = imu_propagate.vel.x();
+        imu_prop_odom.twist.twist.linear.y = imu_propagate.vel.y();
+        imu_prop_odom.twist.twist.linear.z = imu_propagate.vel.z();
+        pubImuPropOdom.publish(imu_prop_odom);
+    }
+    mtx_imu_prop.unlock();
 }
 
 double lidar_mean_scantime = 0.0;
@@ -722,6 +828,8 @@ int main(int argc, char** argv)
         ros::Publisher pub_map = nh.advertise<sensor_msgs::PointCloud2> ("/pcl_map", 1, true);
         ros::Publisher pub_local_map = nh.advertise<sensor_msgs::PointCloud2> ("/local_map", 1);
         pub_signal = nh.advertise<std_msgs::String> ("/signal", 1);
+        pubImuPropOdom = nh.advertise<nav_msgs::Odometry>("/imu_prop_odom", 100000);
+        ros::Timer imu_prop_timer = nh.createTimer(ros::Duration(0.002), imu_prop_callback); // 500Hz timer
         pcl::PointCloud<pcl::PointXYZINormal> map_pt;
         sensor_msgs::PointCloud2 output;
         //be stuck here until loading map finished
@@ -906,6 +1014,22 @@ int main(int argc, char** argv)
 
                 /******* Publish odometry *******/
                 PublishLocalization(pubGlobalLocalization, estimation_pose);
+
+                /******* Save EKF state for IMU propagation *******/
+                {
+                    mtx_imu_prop.lock();
+                    latest_ekf_state.rot  = state_point.rot.toRotationMatrix();
+                    latest_ekf_state.pos  = state_point.pos;
+                    latest_ekf_state.vel  = state_point.vel;
+                    latest_ekf_state.ba   = state_point.ba;
+                    latest_ekf_state.bg   = state_point.bg;
+                    latest_ekf_state.grav = V3D(state_point.grav[0], state_point.grav[1], state_point.grav[2]);
+                    latest_ekf_time = lidar_end_time;
+                    state_update_flg = true;
+                    imu_prop_enable = true;
+                    ekf_finish_once = true;
+                    mtx_imu_prop.unlock();
+                }
 
                 
             } else {

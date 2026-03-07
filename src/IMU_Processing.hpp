@@ -66,6 +66,8 @@ class ImuProcess
   V3D cov_bias_gyr;
   V3D cov_bias_acc;
   double first_lidar_time;
+  bool imu_init_done() const { return !imu_need_init_; }
+  double get_mean_acc_norm() const { return mean_acc.norm(); }
 
  private:
   void IMU_init(const MeasureGroup &meas, 
