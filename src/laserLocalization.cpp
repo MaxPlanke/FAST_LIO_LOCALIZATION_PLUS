@@ -529,6 +529,56 @@ bool sync_packages(MeasureGroup &meas)
     return true;
 }
 
+int process_increments = 0;
+void map_incremental()
+{
+    PointVector PointToAdd;
+    PointVector PointNoNeedDownsample;
+    PointToAdd.reserve(feats_down_size);
+    PointNoNeedDownsample.reserve(feats_down_size);
+    for (int i = 0; i < feats_down_size; i++)
+    {
+        /* transform to world frame */
+        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+        /* decide if need add to map */
+        if (!Nearest_Points[i].empty() && flg_EKF_inited)
+        {
+            const PointVector &points_near = Nearest_Points[i];
+            bool need_add = true;
+            BoxPointType Box_of_Point;
+            PointType downsample_result, mid_point; 
+            mid_point.x = floor(feats_down_world->points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.y = floor(feats_down_world->points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.z = floor(feats_down_world->points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            float dist  = calc_dist(feats_down_world->points[i],mid_point);
+            if (fabs(points_near[0].x - mid_point.x) > 0.5 * filter_size_map_min && fabs(points_near[0].y - mid_point.y) > 0.5 * filter_size_map_min && fabs(points_near[0].z - mid_point.z) > 0.5 * filter_size_map_min){
+                PointNoNeedDownsample.push_back(feats_down_world->points[i]);
+                continue;
+            }
+            for (int readd_i = 0; readd_i < NUM_MATCH_POINTS; readd_i ++)
+            {
+                if (points_near.size() < NUM_MATCH_POINTS) break;
+                if (calc_dist(points_near[readd_i], mid_point) < dist)
+                {
+                    need_add = false;
+                    break;
+                }
+            }
+            if (need_add) PointToAdd.push_back(feats_down_world->points[i]);
+        }
+        else
+        {
+            PointToAdd.push_back(feats_down_world->points[i]);
+        }
+    }
+
+    double st_time = omp_get_wtime();
+    add_point_size = ikdtree.Add_Points(PointToAdd, true);
+    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
+    kdtree_incremental_time = omp_get_wtime() - st_time;
+}
+
 template<typename T>
 void set_posestamp(T & out)
 {
@@ -986,9 +1036,9 @@ int main(int argc, char** argv)
                 // publish_odometry(pubOdomAftMapped);
 
                 /*** add the feature points to map kdtree ***/
-                // t3 = omp_get_wtime();
-                // map_incremental();
-                // t5 = omp_get_wtime();
+                t3 = omp_get_wtime();
+                map_incremental();
+                t5 = omp_get_wtime();
 
                 Eigen::Quaternionf q_u(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z);
                 estimation_pose.block<3,3>(0,0) = q_u.normalized().toRotationMatrix();

@@ -22,7 +22,7 @@
 #include "template_alignment.h"
 
 constexpr float kMAPVOXELSIZE = 0.2;
-constexpr float kLOCALMAP = 10.0;
+constexpr float kLOCALMAP = 50.0;
 constexpr size_t kNUMBER = 36.0;
 
 
