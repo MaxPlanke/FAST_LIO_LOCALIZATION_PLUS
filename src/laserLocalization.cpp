@@ -33,6 +33,7 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
+#include <algorithm>
 #include <mutex>
 #include <math.h>
 #include <thread>
@@ -486,20 +487,25 @@ bool sync_packages(MeasureGroup &meas)
     {
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
+        double max_offset_time = 0.0;
+        for (const auto &point : meas.lidar->points)
+        {
+            max_offset_time = std::max(max_offset_time, point.curvature / double(1000));
+        }
         if (meas.lidar->points.size() <= 1) // time too little
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
             ROS_WARN("Too few input point cloud!\n");
         }
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        else if (max_offset_time < 0.5 * lidar_mean_scantime)
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
         else
         {
             scan_num ++;
-            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
-            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+            lidar_end_time = meas.lidar_beg_time + max_offset_time;
+            lidar_mean_scantime += (max_offset_time - lidar_mean_scantime) / scan_num;
         }
 
         meas.lidar_end_time = lidar_end_time;
@@ -521,6 +527,16 @@ bool sync_packages(MeasureGroup &meas)
         if(imu_time > lidar_end_time) break;
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
+    }
+
+    if (meas.imu.empty())
+    {
+        ROS_WARN_THROTTLE(1.0, "No IMU in lidar scan, drop lidar. lidar: [%.6f, %.6f], first imu: %.6f, latest imu: %.6f",
+                          meas.lidar_beg_time, lidar_end_time, imu_buffer.front()->header.stamp.toSec(), last_timestamp_imu);
+        lidar_buffer.pop_front();
+        time_buffer.pop_front();
+        lidar_pushed = false;
+        return false;
     }
 
     lidar_buffer.pop_front();
