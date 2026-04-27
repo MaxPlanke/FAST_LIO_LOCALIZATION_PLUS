@@ -5,3 +5,7 @@ Log/mat_pre.txt
 Log/pos_log.txt
 Log/predict.csv
 Log/update.csv
+Log/dis_erros.csv
+Log/odom.csv
+Log/pos_log.csv
+PCD/scans.pcd

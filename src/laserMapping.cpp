@@ -39,6 +39,10 @@
 #include <thread>
 #include <fstream>
 #include <csignal>
+#include <cerrno>
+#include <cstring>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -87,6 +91,16 @@ condition_variable sig_buffer;
 
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
+
+static bool ensureDirectory(const string &path)
+{
+    if (mkdir(path.c_str(), 0755) == 0 || errno == EEXIST)
+    {
+        return true;
+    }
+    ROS_WARN_STREAM("Failed to create directory " << path << ": " << strerror(errno));
+    return false;
+}
 
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
@@ -1116,6 +1130,9 @@ int main(int argc, char** argv)
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
+    const string log_dir = root_dir + "/Log";
+    ensureDirectory(log_dir);
+
     FILE *fp;
     string pos_log_dir = root_dir + "/Log/pos_log.csv";
     fp = fopen(pos_log_dir.c_str(),"w");
@@ -1125,9 +1142,9 @@ int main(int argc, char** argv)
     fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
     fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
     if (fout_pre && fout_out)
-        cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
+        cout << "~~~~"<<log_dir<<" file opened" << endl;
     else
-        cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        cout << "~~~~"<<log_dir<<" doesn't exist or is not writable" << endl;
 
     /*** ROS subscribe initialization ***/
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? \
@@ -1280,9 +1297,9 @@ int main(int argc, char** argv)
                 if (effct_feat_num > 10 ) {
                     state_ikfom pose_test;
                     StateAssess(feats_down_body, normvec, Nearest_Points, pose_test, ang);
-                    std::cout << "There is no enough points " << effct_feat_num << std::endl;
+                    ROS_DEBUG("StateAssess: effct_feat_num=%d, horizontal_pts=%zu", effct_feat_num, ang.size());
                 } else {
-                    std::cout << "There is no enough points " << effct_feat_num << std::endl;
+                    ROS_WARN_THROTTLE(1.0, "Not enough effective feature points for StateAssess: %d", effct_feat_num);
                 }
             }
 
