@@ -105,6 +105,8 @@ static bool ensureDirectory(const string &path)
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double imu_lidar_time_tolerance = 0.005;
+double lidar_split_interval = 0.005;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
@@ -158,6 +160,55 @@ bool lio_mode = true;
 
 shared_ptr<Preprocess> p_pre(new Preprocess());
 shared_ptr<ImuProcess> p_imu(new ImuProcess());
+
+void push_lidar_cloud_by_time(const PointCloudXYZI::Ptr &cloud, double scan_beg_time)
+{
+    if (cloud->empty() || lidar_split_interval <= 0.0)
+    {
+        lidar_buffer.push_back(cloud);
+        time_buffer.push_back(scan_beg_time);
+        return;
+    }
+
+    double max_offset_time = 0.0;
+    for (const auto &point : cloud->points)
+    {
+        max_offset_time = std::max(max_offset_time, double(point.curvature) / 1000.0);
+    }
+
+    if (max_offset_time <= lidar_split_interval)
+    {
+        lidar_buffer.push_back(cloud);
+        time_buffer.push_back(scan_beg_time);
+        return;
+    }
+
+    const size_t split_num = static_cast<size_t>(std::floor(max_offset_time / lidar_split_interval)) + 1;
+    vector<PointCloudXYZI::Ptr> split_clouds(split_num);
+    for (auto &split_cloud : split_clouds)
+    {
+        split_cloud.reset(new PointCloudXYZI());
+        split_cloud->reserve(cloud->size() / split_num + 1);
+        split_cloud->header = cloud->header;
+        split_cloud->is_dense = cloud->is_dense;
+    }
+
+    for (const auto &point : cloud->points)
+    {
+        const double offset_time = std::max(0.0, double(point.curvature) / 1000.0);
+        const size_t split_idx = std::min(static_cast<size_t>(offset_time / lidar_split_interval), split_num - 1);
+        PointType split_point = point;
+        split_point.curvature = std::max(0.0, double(point.curvature) - split_idx * lidar_split_interval * 1000.0);
+        split_clouds[split_idx]->push_back(split_point);
+    }
+
+    for (size_t i = 0; i < split_clouds.size(); i++)
+    {
+        if (split_clouds[i]->empty()) continue;
+        lidar_buffer.push_back(split_clouds[i]);
+        time_buffer.push_back(scan_beg_time + i * lidar_split_interval);
+    }
+}
 
 void SigHandle(int sig)
 {
@@ -305,12 +356,12 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     {
         ROS_ERROR("lidar loop back, clear buffer");
         lidar_buffer.clear();
+        time_buffer.clear();
     }
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(msg->header.stamp.toSec());
+    push_lidar_cloud_by_time(ptr, msg->header.stamp.toSec());
     last_timestamp_lidar = msg->header.stamp.toSec();
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
@@ -328,6 +379,7 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
     {
         ROS_ERROR("lidar loop back, clear buffer");
         lidar_buffer.clear();
+        time_buffer.clear();
     }
     last_timestamp_lidar = msg->header.stamp.toSec();
     
@@ -346,8 +398,7 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr, lio_mode);
     
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(last_timestamp_lidar);
+    push_lidar_cloud_by_time(ptr, last_timestamp_lidar);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
@@ -437,6 +488,17 @@ bool sync_packages(MeasureGroup &meas)
         if(imu_time > lidar_end_time) break;
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
+    }
+
+    if (meas.imu.empty() && !imu_buffer.empty())
+    {
+        double first_imu_time = imu_buffer.front()->header.stamp.toSec();
+        if (first_imu_time >= lidar_end_time &&
+            first_imu_time - lidar_end_time <= imu_lidar_time_tolerance)
+        {
+            meas.imu.push_back(imu_buffer.front());
+            imu_buffer.pop_front();
+        }
     }
 
     if (meas.imu.empty())
@@ -1071,6 +1133,8 @@ int main(int argc, char** argv)
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+    nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
+    nh.param<double>("common/lidar_split_interval", lidar_split_interval, 0.005);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);

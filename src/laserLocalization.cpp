@@ -105,6 +105,7 @@ static bool ensureDirectory(const string &path)
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double imu_lidar_time_tolerance = 0.005;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
@@ -543,6 +544,17 @@ bool sync_packages(MeasureGroup &meas)
         imu_buffer.pop_front();
     }
 
+    if (meas.imu.empty() && !imu_buffer.empty())
+    {
+        double first_imu_time = imu_buffer.front()->header.stamp.toSec();
+        if (first_imu_time >= lidar_end_time &&
+            first_imu_time - lidar_end_time <= imu_lidar_time_tolerance)
+        {
+            meas.imu.push_back(imu_buffer.front());
+            imu_buffer.pop_front();
+        }
+    }
+
     if (meas.imu.empty())
     {
         ROS_WARN_THROTTLE(1.0, "No IMU in lidar scan, drop lidar. lidar: [%.6f, %.6f], first imu: %.6f, latest imu: %.6f",
@@ -814,6 +826,7 @@ int main(int argc, char** argv)
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+    nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
