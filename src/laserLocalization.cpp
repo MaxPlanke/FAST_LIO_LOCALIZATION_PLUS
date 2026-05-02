@@ -853,7 +853,7 @@ int main(int argc, char** argv)
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
     
     path.header.stamp    = ros::Time::now();
-    path.header.frame_id ="camera_init";
+    path.header.frame_id ="map";
 
     /*** variables definition ***/
     int effect_feat_num = 0, frame_num = 0;
@@ -971,7 +971,24 @@ int main(int argc, char** argv)
                         flg_first_scan = true;
                         continue;
                     }
-                    if (pure_localization_->reLocalization(Measures.lidar, local_map_ptr, estimation_pose)) {
+                    
+                    // Convert lidar points to IMU frame before relocalization
+                    pcl::PointCloud<PointType>::Ptr lidar_imu(new pcl::PointCloud<PointType>());
+                    lidar_imu->reserve(Measures.lidar->size());
+                    
+                    // Use extrinsic matrices already loaded from yaml
+                    for (const auto &pt : Measures.lidar->points) {
+                        PointType pt_imu;
+                        Eigen::Vector3d pt_lidar(pt.x, pt.y, pt.z);
+                        Eigen::Vector3d pt_imu_vec = Lidar_R_wrt_IMU.cast<double>() * pt_lidar + Lidar_T_wrt_IMU.cast<double>();
+                        pt_imu.x = pt_imu_vec(0);
+                        pt_imu.y = pt_imu_vec(1);
+                        pt_imu.z = pt_imu_vec(2);
+                        pt_imu.intensity = pt.intensity;
+                        lidar_imu->push_back(pt_imu);
+                    }
+                    
+                    if (pure_localization_->reLocalization(lidar_imu, local_map_ptr, estimation_pose)) {
                         std::cout << "Successfully relocalize, and its pose: \n " << estimation_pose << std::endl;
                         
                         std_msgs::String signal_msg;
@@ -1103,9 +1120,25 @@ int main(int argc, char** argv)
 
                 // pure_localization_->TestFovMap(estimation_pose, feats_undistort);
 
+                // Convert point cloud from Lidar frame to IMU frame before publishing
                 sensor_msgs::PointCloud2 show;
-                pcl::toROSMsg(*feats_undistort, show);
-                show.header.frame_id = "local_map";
+                pcl::PointCloud<PointType> feats_in_imu;
+                feats_in_imu.reserve(feats_undistort->size());
+                
+                for (const auto &pt : feats_undistort->points) {
+                    PointType pt_imu;
+                    Eigen::Vector3d pt_lidar(pt.x, pt.y, pt.z);
+                    // Transform from Lidar to IMU: P_imu = R_L_I * P_lidar + T_L_I
+                    Eigen::Vector3d pt_imu_vec = state_point.offset_R_L_I * pt_lidar + state_point.offset_T_L_I;
+                    pt_imu.x = pt_imu_vec(0);
+                    pt_imu.y = pt_imu_vec(1);
+                    pt_imu.z = pt_imu_vec(2);
+                    pt_imu.intensity = pt.intensity;
+                    feats_in_imu.push_back(pt_imu);
+                }
+                
+                pcl::toROSMsg(feats_in_imu, show);
+                show.header.frame_id = "local_map";  // IMU frame (body frame)
                 pub_local_map.publish(show);
 
                 /******* Publish odometry *******/

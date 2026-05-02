@@ -44,13 +44,17 @@ class RelocalizationHandler:
     def restart_fastlio_node(self):
         """Restart the fastlio_localization node"""
         try:
-            # Command to launch the fastlio_localization node
+            # Since we're launched by the launch file, the ROS environment is already set up
+            # Just use rosrun which will use the current ROS environment
             cmd = ['rosrun', 'fast_lio', 'fastlio_localization']
             
             # Start the process
-            self.fastlio_process = subprocess.Popen(cmd, 
-                                                   stdout=subprocess.PIPE, 
-                                                   stderr=subprocess.PIPE)
+            self.fastlio_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid  # Create new process group
+            )
             rospy.loginfo("Successfully restarted fastlio_localization node")
             
         except Exception as e:
