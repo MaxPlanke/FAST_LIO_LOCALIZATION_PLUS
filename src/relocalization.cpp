@@ -105,6 +105,9 @@ bool ReLocalization::reLocalization(const pcl::PointCloud<pcl::PointXYZINormal>:
         // if (!NDTMatch(current_scan, local_map, T_offset)) {
         //     return false;
         // }
+        // if (!NDTMatch(current_scan, local_map, T_offset)) {
+        //     return false;
+        // }
         // refine estimation
         estimation_pose =  T_offset;
         
@@ -288,12 +291,12 @@ bool ReLocalization::RefinePose(const pcl::PointCloud<pcl::PointXYZINormal>::Ptr
 	icp_.align(final, T);
 
     T = icp_.getFinalTransformation();
-    if (icp_.hasConverged()) {
-        std::cout << "ICP converged." << std::endl << "The score is " << icp_.getFitnessScore() << std::endl;
-    } else {
-        std::cerr << "###ICP did not converge." << std::endl;
-        return false;
-    }
+    // if (icp_.hasConverged()) {
+    //     std::cout << "ICP converged." << std::endl << "The score is " << icp_.getFitnessScore() << std::endl;
+    // } else {
+    //     std::cerr << "###ICP did not converge." << std::endl;
+    //     return false;
+    // }
 	std::cout << "ICP offset:" << T(0,3) << ", "<< T(1,3) << ", "<< T(2,3)<< std::endl;
     return true;
 }

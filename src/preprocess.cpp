@@ -1,4 +1,5 @@
 #include "preprocess.h"
+#include <limits>
 
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
@@ -6,6 +7,7 @@
 Preprocess::Preprocess()
   :feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
 {
+  scan_start_time = 0.0;
   inf_bound = 10;
   N_SCANS   = 6;
   SCAN_RATE = 10;
@@ -53,6 +55,7 @@ void Preprocess::process(const livox_ros_driver2::CustomMsg::ConstPtr &msg, Poin
 
 void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointCloudXYZI::Ptr &pcl_out)
 {
+  scan_start_time = msg->header.stamp.toSec();
   switch (time_unit)
   {
     case SEC:
@@ -80,6 +83,10 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
 
   case VELO16:
     velodyne_handler(msg);
+    break;
+
+  case HESAI:
+    hesai_handler(msg);
     break;
   
   default:
@@ -279,6 +286,55 @@ void Preprocess::oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   }
   // pub_func(pl_surf, pub_full, msg->header.stamp);
   // pub_func(pl_surf, pub_corn, msg->header.stamp);
+}
+
+void Preprocess::hesai_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<hesai_ros::Point> pl_orig;
+  pcl::fromROSMsg(*msg, pl_orig);
+  int plsize = pl_orig.points.size();
+  if (plsize == 0) return;
+  pl_surf.reserve(plsize);
+
+  double scan_beg_time = std::numeric_limits<double>::max();
+  for (int i = 0; i < plsize; i++)
+  {
+    if (pl_orig.points[i].timestamp > 0.0 && pl_orig.points[i].timestamp < scan_beg_time)
+    {
+      scan_beg_time = pl_orig.points[i].timestamp;
+    }
+  }
+  if (scan_beg_time == std::numeric_limits<double>::max())
+  {
+    scan_beg_time = msg->header.stamp.toSec();
+  }
+  scan_start_time = scan_beg_time;
+
+  for (int i = 0; i < plsize; i++)
+  {
+    if (i % point_filter_num != 0) continue;
+
+    PointType added_pt;
+    added_pt.normal_x = 0;
+    added_pt.normal_y = 0;
+    added_pt.normal_z = 0;
+    added_pt.x = pl_orig.points[i].x;
+    added_pt.y = pl_orig.points[i].y;
+    added_pt.z = pl_orig.points[i].z;
+    added_pt.intensity = pl_orig.points[i].intensity;
+    added_pt.curvature = std::max(0.0, pl_orig.points[i].timestamp - scan_beg_time) * 1000.0;
+
+    if (pl_orig.points[i].ring >= N_SCANS) continue;
+
+    if(added_pt.x*added_pt.x+added_pt.y*added_pt.y+added_pt.z*added_pt.z > (blind * blind))
+    {
+      pl_surf.points.push_back(added_pt);
+    }
+  }
 }
 
 void Preprocess::velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)

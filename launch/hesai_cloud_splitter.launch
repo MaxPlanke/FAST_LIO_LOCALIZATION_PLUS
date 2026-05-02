@@ -1,0 +1,15 @@
+<launch>
+  <arg name="input_topic" default="/hesai/pandar" />
+  <arg name="output_topic" default="/hesai/pandar_split" />
+  <arg name="split_interval" default="0.01" />
+
+  <node pkg="fast_lio" type="hesai_cloud_splitter" name="hesai_cloud_splitter" output="screen">
+    <param name="input_topic" value="$(arg input_topic)" />
+    <param name="output_topic" value="$(arg output_topic)" />
+    <param name="split_interval" value="$(arg split_interval)" />
+    <param name="timestamp_field" value="timestamp" />
+    <param name="use_msg_stamp_as_start" value="true" />
+    <param name="stamp_output_with_bucket_start" value="true" />
+    <param name="publish_in_scan_time" value="true" />
+  </node>
+</launch>

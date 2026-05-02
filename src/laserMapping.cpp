@@ -33,11 +33,16 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
+#include <algorithm>
 #include <mutex>
 #include <math.h>
 #include <thread>
 #include <fstream>
 #include <csignal>
+#include <cerrno>
+#include <cstring>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -87,9 +92,20 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 
+static bool ensureDirectory(const string &path)
+{
+    if (mkdir(path.c_str(), 0755) == 0 || errno == EEXIST)
+    {
+        return true;
+    }
+    ROS_WARN_STREAM("Failed to create directory " << path << ": " << strerror(errno));
+    return false;
+}
+
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double imu_lidar_time_tolerance = 0.005;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 double lidar_split_interval = 0.02;
@@ -151,6 +167,7 @@ void SigHandle(int sig)
     ROS_WARN("catch sig %d", sig);
     sig_buffer.notify_all();
 }
+
 
 inline void dump_lio_state_to_log(FILE *fp)  
 {
@@ -289,7 +306,7 @@ void push_lidar_cloud_with_interval(const PointCloudXYZI::Ptr &cloud, const doub
         time_buffer.push_back(scan_start_time + static_cast<double>(i) * lidar_split_interval);
         last_timestamp_lidar = scan_start_time + static_cast<double>(i) * lidar_split_interval;
     }
-
+    std::cout << "Split LiDAR cloud into " << segment_num << " segments, max offset: " << max_offset_ms << " ms, split interval: " << split_interval_ms << " ms." << std::endl;
     
 }
 
@@ -358,15 +375,17 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     mtx_buffer.lock();
     scan_count ++;
     double preprocess_start_time = omp_get_wtime();
-    if (msg->header.stamp.toSec() < last_timestamp_lidar)
-    {
-        ROS_ERROR("lidar loop back, clear buffer");
-        lidar_buffer.clear();
-    }
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
-    push_lidar_cloud_with_interval(ptr, msg->header.stamp.toSec());
+    double scan_start_time = msg->header.stamp.toSec();
+    if (scan_start_time < last_timestamp_lidar)
+    {
+        ROS_ERROR("lidar loop back, clear buffer");
+        lidar_buffer.clear();
+        time_buffer.clear();
+    }
+    push_lidar_cloud_with_interval(ptr, scan_start_time);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
@@ -385,6 +404,7 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
     {
         ROS_ERROR("lidar loop back, clear buffer");
         lidar_buffer.clear();
+        time_buffer.clear();
     }
     last_timestamp_lidar = scan_start_time;
     
@@ -453,20 +473,25 @@ bool sync_packages(MeasureGroup &meas)
     {
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
+        double max_offset_time = 0.0;
+        for (const auto &point : meas.lidar->points)
+        {
+            max_offset_time = std::max(max_offset_time, point.curvature / double(1000));
+        }
         if (meas.lidar->points.size() <= 1) // time too little
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
             ROS_WARN("Too few input point cloud!\n");
         }
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        else if (max_offset_time < 0.5 * lidar_mean_scantime)
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
         else
         {
             scan_num ++;
-            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
-            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+            lidar_end_time = meas.lidar_beg_time + max_offset_time;
+            lidar_mean_scantime += (max_offset_time - lidar_mean_scantime) / scan_num;
         }
 
         meas.lidar_end_time = lidar_end_time;
@@ -488,6 +513,27 @@ bool sync_packages(MeasureGroup &meas)
         if(imu_time > lidar_end_time) break;
         meas.imu.push_back(imu_buffer.front());
         imu_buffer.pop_front();
+    }
+
+    if (meas.imu.empty() && !imu_buffer.empty())
+    {
+        double first_imu_time = imu_buffer.front()->header.stamp.toSec();
+        if (first_imu_time >= lidar_end_time &&
+            first_imu_time - lidar_end_time <= imu_lidar_time_tolerance)
+        {
+            meas.imu.push_back(imu_buffer.front());
+            imu_buffer.pop_front();
+        }
+    }
+
+    if (meas.imu.empty())
+    {
+        ROS_WARN_THROTTLE(1.0, "No IMU in lidar scan, drop lidar. lidar: [%.6f, %.6f], first imu: %.6f, latest imu: %.6f",
+                          meas.lidar_beg_time, lidar_end_time, imu_buffer.front()->header.stamp.toSec(), last_timestamp_imu);
+        lidar_buffer.pop_front();
+        time_buffer.pop_front();
+        lidar_pushed = false;
+        return false;
     }
 
     lidar_buffer.pop_front();
@@ -1112,6 +1158,8 @@ int main(int argc, char** argv)
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+    nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
+    nh.param<double>("common/lidar_split_interval", lidar_split_interval, 0.005);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
@@ -1128,7 +1176,6 @@ int main(int argc, char** argv)
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US);
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
-    nh.param<double>("preprocess/lidar_split_interval", lidar_split_interval, 0.02);
     nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
     nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
     nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
@@ -1176,6 +1223,9 @@ int main(int argc, char** argv)
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
+    const string log_dir = root_dir + "/Log";
+    ensureDirectory(log_dir);
+
     FILE *fp;
     string pos_log_dir = root_dir + "/Log/pos_log.csv";
     fp = fopen(pos_log_dir.c_str(),"w");
@@ -1185,9 +1235,9 @@ int main(int argc, char** argv)
     fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
     fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
     if (fout_pre && fout_out)
-        cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
+        cout << "~~~~"<<log_dir<<" file opened" << endl;
     else
-        cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        cout << "~~~~"<<log_dir<<" doesn't exist or is not writable" << endl;
 
     /*** ROS subscribe initialization ***/
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? \
@@ -1340,9 +1390,9 @@ int main(int argc, char** argv)
                 if (effct_feat_num > 10 ) {
                     state_ikfom pose_test;
                     StateAssess(feats_down_body, normvec, Nearest_Points, pose_test, ang);
-                    std::cout << "There is no enough points " << effct_feat_num << std::endl;
+                    ROS_DEBUG("StateAssess: effct_feat_num=%d, horizontal_pts=%zu", effct_feat_num, ang.size());
                 } else {
-                    std::cout << "There is no enough points " << effct_feat_num << std::endl;
+                    ROS_WARN_THROTTLE(1.0, "Not enough effective feature points for StateAssess: %d", effct_feat_num);
                 }
             }
 

@@ -33,11 +33,16 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
+#include <algorithm>
 #include <mutex>
 #include <math.h>
 #include <thread>
 #include <fstream>
 #include <csignal>
+#include <cerrno>
+#include <cstring>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <Python.h>
 #include <so3_math.h>
@@ -87,9 +92,20 @@ condition_variable sig_buffer;
 string root_dir = ROOT_DIR;
 string map_file_path, lid_topic, imu_topic;
 
+static bool ensureDirectory(const string &path)
+{
+    if (mkdir(path.c_str(), 0755) == 0 || errno == EEXIST)
+    {
+        return true;
+    }
+    ROS_WARN_STREAM("Failed to create directory " << path << ": " << strerror(errno));
+    return false;
+}
+
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
+double imu_lidar_time_tolerance = 0.005;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
@@ -486,20 +502,25 @@ bool sync_packages(MeasureGroup &meas)
     {
         meas.lidar = lidar_buffer.front();
         meas.lidar_beg_time = time_buffer.front();
+        double max_offset_time = 0.0;
+        for (const auto &point : meas.lidar->points)
+        {
+            max_offset_time = std::max(max_offset_time, point.curvature / double(1000));
+        }
         if (meas.lidar->points.size() <= 1) // time too little
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
             ROS_WARN("Too few input point cloud!\n");
         }
-        else if (meas.lidar->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime)
+        else if (max_offset_time < 0.5 * lidar_mean_scantime)
         {
             lidar_end_time = meas.lidar_beg_time + lidar_mean_scantime;
         }
         else
         {
             scan_num ++;
-            lidar_end_time = meas.lidar_beg_time + meas.lidar->points.back().curvature / double(1000);
-            lidar_mean_scantime += (meas.lidar->points.back().curvature / double(1000) - lidar_mean_scantime) / scan_num;
+            lidar_end_time = meas.lidar_beg_time + max_offset_time;
+            lidar_mean_scantime += (max_offset_time - lidar_mean_scantime) / scan_num;
         }
 
         meas.lidar_end_time = lidar_end_time;
@@ -523,10 +544,81 @@ bool sync_packages(MeasureGroup &meas)
         imu_buffer.pop_front();
     }
 
+    if (meas.imu.empty() && !imu_buffer.empty())
+    {
+        double first_imu_time = imu_buffer.front()->header.stamp.toSec();
+        if (first_imu_time >= lidar_end_time &&
+            first_imu_time - lidar_end_time <= imu_lidar_time_tolerance)
+        {
+            meas.imu.push_back(imu_buffer.front());
+            imu_buffer.pop_front();
+        }
+    }
+
+    if (meas.imu.empty())
+    {
+        ROS_WARN_THROTTLE(1.0, "No IMU in lidar scan, drop lidar. lidar: [%.6f, %.6f], first imu: %.6f, latest imu: %.6f",
+                          meas.lidar_beg_time, lidar_end_time, imu_buffer.front()->header.stamp.toSec(), last_timestamp_imu);
+        lidar_buffer.pop_front();
+        time_buffer.pop_front();
+        lidar_pushed = false;
+        return false;
+    }
+
     lidar_buffer.pop_front();
     time_buffer.pop_front();
     lidar_pushed = false;
     return true;
+}
+
+int process_increments = 0;
+void map_incremental()
+{
+    PointVector PointToAdd;
+    PointVector PointNoNeedDownsample;
+    PointToAdd.reserve(feats_down_size);
+    PointNoNeedDownsample.reserve(feats_down_size);
+    for (int i = 0; i < feats_down_size; i++)
+    {
+        /* transform to world frame */
+        pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
+        /* decide if need add to map */
+        if (!Nearest_Points[i].empty() && flg_EKF_inited)
+        {
+            const PointVector &points_near = Nearest_Points[i];
+            bool need_add = true;
+            BoxPointType Box_of_Point;
+            PointType downsample_result, mid_point; 
+            mid_point.x = floor(feats_down_world->points[i].x/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.y = floor(feats_down_world->points[i].y/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            mid_point.z = floor(feats_down_world->points[i].z/filter_size_map_min)*filter_size_map_min + 0.5 * filter_size_map_min;
+            float dist  = calc_dist(feats_down_world->points[i],mid_point);
+            if (fabs(points_near[0].x - mid_point.x) > 0.5 * filter_size_map_min && fabs(points_near[0].y - mid_point.y) > 0.5 * filter_size_map_min && fabs(points_near[0].z - mid_point.z) > 0.5 * filter_size_map_min){
+                PointNoNeedDownsample.push_back(feats_down_world->points[i]);
+                continue;
+            }
+            for (int readd_i = 0; readd_i < NUM_MATCH_POINTS; readd_i ++)
+            {
+                if (points_near.size() < NUM_MATCH_POINTS) break;
+                if (calc_dist(points_near[readd_i], mid_point) < dist)
+                {
+                    need_add = false;
+                    break;
+                }
+            }
+            if (need_add) PointToAdd.push_back(feats_down_world->points[i]);
+        }
+        else
+        {
+            PointToAdd.push_back(feats_down_world->points[i]);
+        }
+    }
+
+    double st_time = omp_get_wtime();
+    add_point_size = ikdtree.Add_Points(PointToAdd, true);
+    ikdtree.Add_Points(PointNoNeedDownsample, false); 
+    add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
+    kdtree_incremental_time = omp_get_wtime() - st_time;
 }
 
 template<typename T>
@@ -734,6 +826,7 @@ int main(int argc, char** argv)
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
+    nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
@@ -792,6 +885,9 @@ int main(int argc, char** argv)
     kf.init_dyn_share(get_f, df_dx, df_dw, h_share_model, NUM_MAX_ITERATIONS, epsi);
 
     /*** debug record ***/
+    const string log_dir = root_dir + "/Log";
+    ensureDirectory(log_dir);
+
     FILE *fp;
     string pos_log_dir = root_dir + "/Log/pos_log.txt";
     fp = fopen(pos_log_dir.c_str(),"w");
@@ -801,9 +897,9 @@ int main(int argc, char** argv)
     fout_out.open(DEBUG_FILE_DIR("mat_out.txt"),ios::out);
     fout_dbg.open(DEBUG_FILE_DIR("dbg.txt"),ios::out);
     if (fout_pre && fout_out)
-        cout << "~~~~"<<ROOT_DIR<<" file opened" << endl;
+        cout << "~~~~"<<log_dir<<" file opened" << endl;
     else
-        cout << "~~~~"<<ROOT_DIR<<" doesn't exist" << endl;
+        cout << "~~~~"<<log_dir<<" doesn't exist or is not writable" << endl;
 
     /*** ROS subscribe initialization ***/
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? nh.subscribe(lid_topic, 200000, livox_pcl_cbk) : nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
@@ -986,9 +1082,9 @@ int main(int argc, char** argv)
                 // publish_odometry(pubOdomAftMapped);
 
                 /*** add the feature points to map kdtree ***/
-                // t3 = omp_get_wtime();
-                // map_incremental();
-                // t5 = omp_get_wtime();
+                t3 = omp_get_wtime();
+                map_incremental();
+                t5 = omp_get_wtime();
 
                 Eigen::Quaternionf q_u(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z);
                 estimation_pose.block<3,3>(0,0) = q_u.normalized().toRotationMatrix();
