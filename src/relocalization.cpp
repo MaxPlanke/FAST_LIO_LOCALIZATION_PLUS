@@ -102,14 +102,14 @@ bool ReLocalization::reLocalization(const pcl::PointCloud<pcl::PointXYZINormal>:
     #if 1
         // rough estimation
         Eigen::Matrix4f T_offset = initial_pose_;
-        if (!NDTMatch(current_scan, local_map, T_offset)) {
-            return false;
-        }
+        // if (!NDTMatch(current_scan, local_map, T_offset)) {
+        //     return false;
+        // }
         // refine estimation
         estimation_pose =  T_offset;
         
         // FindPartsMapInGlobalMap(estimation_pose, local_map);
-        if (!RefinePose(current_scan, local_map, estimation_pose)) {
+        if (!GicpMatch(current_scan, local_map, estimation_pose)) {
             std::cout << "WARNING!!! ICP could not refine the pose" << std::endl;
             return false;
         }
@@ -193,52 +193,52 @@ bool ReLocalization::NDTMatch(const pcl::PointCloud<pcl::PointXYZINormal>::Ptr i
   return true;
 }
 
-bool ReLocalization::Localization(const pcl::PointCloud<pcl::PointXYZINormal>::Ptr in,
-                                    pcl::PointCloud<pcl::PointXYZINormal>::Ptr local_map,
-                                    Eigen::Matrix4f& pos_inv) {
-    Eigen::Matrix4f estimation_pose = pos_inv;
-    if (relocalzation_flag_) {
-        FindPartsMapInGlobalMap(initial_pose_, local_map);
-        std::cout << "*****Relocalization in given initial pose*****"<< std::endl;
-    } else {
-        FindPartsMapInGlobalMap(estimation_pose, local_map);
-    }
+// bool ReLocalization::Localization(const pcl::PointCloud<pcl::PointXYZINormal>::Ptr in,
+//                                     pcl::PointCloud<pcl::PointXYZINormal>::Ptr local_map,
+//                                     Eigen::Matrix4f& pos_inv) {
+//     Eigen::Matrix4f estimation_pose = pos_inv;
+//     if (relocalzation_flag_) {
+//         FindPartsMapInGlobalMap(initial_pose_, local_map);
+//         std::cout << "*****Relocalization in given initial pose*****"<< std::endl;
+//     } else {
+//         FindPartsMapInGlobalMap(estimation_pose, local_map);
+//     }
 
-    // // downsample clouds
-    current_scan = boost::make_shared<pcl::PointCloud<pcl::PointXYZINormal>>(*in);
-	this->voxel_filter_.setInputCloud(current_scan);
-	this->voxel_filter_.filter(*current_scan);
+//     // // downsample clouds
+//     current_scan = boost::make_shared<pcl::PointCloud<pcl::PointXYZINormal>>(*in);
+// 	this->voxel_filter_.setInputCloud(current_scan);
+// 	this->voxel_filter_.filter(*current_scan);
 
-    // rough estimation
-    Eigen::Matrix4f T_offset;
-    if (!GicpMatch(current_scan, local_map, T_offset)) {
-        return false;
-    } else {
-        // refine estimation
-        if (relocalzation_flag_) {
-            estimation_pose =  initial_pose_ * T_offset;
-        } else {
-            estimation_pose =  estimation_pose * T_offset;
-        }
-        FindPartsMapInGlobalMap(estimation_pose, local_map);
-        if (!RefinePose(current_scan, local_map, T_offset)) {
-            std::cout << "WARNING!!! ICP could not refine the pose" << std::endl;
-        }
-    }
+//     // rough estimation
+//     Eigen::Matrix4f T_offset;
+//     if (!GicpMatch(current_scan, local_map, T_offset)) {
+//         return false;
+//     } else {
+//         // refine estimation
+//         if (relocalzation_flag_) {
+//             estimation_pose =  initial_pose_ * T_offset;
+//         } else {
+//             estimation_pose =  estimation_pose * T_offset;
+//         }
+//         FindPartsMapInGlobalMap(estimation_pose, local_map);
+//         if (!RefinePose(current_scan, local_map, T_offset)) {
+//             std::cout << "WARNING!!! ICP could not refine the pose" << std::endl;
+//         }
+//     }
 
-    if (relocalzation_flag_) {
-        estimation_pose =  initial_pose_ * T_offset;
-        relocalzation_flag_ = false;
-        std::cout << "first estimation_pose :" << estimation_pose(0,3) << ", "<< estimation_pose(1,3) << ", "<< estimation_pose(2,3)<< std::endl;
-    } else {
-        estimation_pose =  estimation_pose * T_offset;
-    }
-    pos_inv =  estimation_pose;
-    std::cout << "after convert point size :" << local_map->points.size() << std::endl;
-    std::cout << "---------------------------estimation_pose :" << pos_inv(0,3) << ", "<< pos_inv(1,3) << ", "<< pos_inv(2,3)<< std::endl;
+//     if (relocalzation_flag_) {
+//         estimation_pose =  initial_pose_ * T_offset;
+//         relocalzation_flag_ = false;
+//         std::cout << "first estimation_pose :" << estimation_pose(0,3) << ", "<< estimation_pose(1,3) << ", "<< estimation_pose(2,3)<< std::endl;
+//     } else {
+//         estimation_pose =  estimation_pose * T_offset;
+//     }
+//     pos_inv =  estimation_pose;
+//     std::cout << "after convert point size :" << local_map->points.size() << std::endl;
+//     std::cout << "---------------------------estimation_pose :" << pos_inv(0,3) << ", "<< pos_inv(1,3) << ", "<< pos_inv(2,3)<< std::endl;
 
-    return true;
-}
+//     return true;
+// }
 
 void ReLocalization::Odometry(const pcl::PointCloud<pcl::PointXYZINormal>::Ptr in,
                                 Eigen::Matrix4f& pos_predict) {

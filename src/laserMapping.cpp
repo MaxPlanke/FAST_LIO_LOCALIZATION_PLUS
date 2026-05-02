@@ -92,6 +92,7 @@ double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
+double lidar_split_interval = 0.02;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -231,6 +232,77 @@ void points_cache_collect()
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
 }
 
+void push_lidar_cloud_with_interval(const PointCloudXYZI::Ptr &cloud, const double scan_start_time)
+{
+    if (cloud == nullptr || cloud->points.empty())
+    {
+        return;
+    }
+
+    if (lidar_split_interval <= 0.0)
+    {
+        lidar_buffer.push_back(cloud);
+        time_buffer.push_back(scan_start_time);
+        return;
+    }
+
+    const double split_interval_ms = lidar_split_interval * 1000.0;
+    double max_offset_ms = 0.0;
+    for (size_t i = 0; i < cloud->points.size(); ++i)
+    {
+        max_offset_ms = max(max_offset_ms, static_cast<double>(cloud->points[i].curvature));
+    }
+
+    const size_t segment_num = max<size_t>(1, static_cast<size_t>(max_offset_ms / split_interval_ms) + 1);
+    vector<PointCloudXYZI::Ptr> segments(segment_num);
+    for (size_t i = 0; i < segment_num; ++i)
+    {
+        segments[i].reset(new PointCloudXYZI());
+        segments[i]->is_dense = cloud->is_dense;
+        segments[i]->header = cloud->header;
+    }
+
+    for (size_t i = 0; i < cloud->points.size(); ++i)
+    {
+        PointType point = cloud->points[i];
+        const double point_offset_ms = max(0.0, static_cast<double>(point.curvature));
+        size_t segment_idx = static_cast<size_t>(point_offset_ms / split_interval_ms);
+        if (segment_idx >= segment_num)
+        {
+            segment_idx = segment_num - 1;
+        }
+        const double segment_start_ms = static_cast<double>(segment_idx) * split_interval_ms;
+        point.curvature = point_offset_ms - segment_start_ms;
+        segments[segment_idx]->points.push_back(point);
+    }
+
+    for (size_t i = 0; i < segment_num; ++i)
+    {
+        PointCloudXYZI::Ptr &segment_cloud = segments[i];
+        if (segment_cloud->points.empty())
+        {
+            continue;
+        }
+        segment_cloud->width = segment_cloud->points.size();
+        segment_cloud->height = 1;
+        lidar_buffer.push_back(segment_cloud);
+        time_buffer.push_back(scan_start_time + static_cast<double>(i) * lidar_split_interval);
+        last_timestamp_lidar = scan_start_time + static_cast<double>(i) * lidar_split_interval;
+    }
+
+    
+}
+
+inline double get_livox_scan_start_time(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
+{
+    // For Livox CustomMsg, `timebase` is the timestamp of the first point.
+    if (msg->timebase > 0)
+    {
+        return static_cast<double>(msg->timebase) * 1e-9;
+    }
+    return msg->header.stamp.toSec();
+}
+
 BoxPointType LocalMap_Points;
 bool Localmap_Initialized = false;
 void lasermap_fov_segment()
@@ -294,9 +366,8 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(msg->header.stamp.toSec());
-    last_timestamp_lidar = msg->header.stamp.toSec();
+    push_lidar_cloud_with_interval(ptr, msg->header.stamp.toSec());
+    
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -309,12 +380,13 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
     mtx_buffer.lock();
     double preprocess_start_time = omp_get_wtime();
     scan_count ++;
-    if (msg->header.stamp.toSec() < last_timestamp_lidar)
+    const double scan_start_time = get_livox_scan_start_time(msg);
+    if (scan_start_time < last_timestamp_lidar)
     {
         ROS_ERROR("lidar loop back, clear buffer");
         lidar_buffer.clear();
     }
-    last_timestamp_lidar = msg->header.stamp.toSec();
+    last_timestamp_lidar = scan_start_time;
     
     if (!time_sync_en && abs(last_timestamp_imu - last_timestamp_lidar) > 10.0 && !imu_buffer.empty() && !lidar_buffer.empty() )
     {
@@ -330,9 +402,8 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
 
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr, lio_mode);
-    
-    lidar_buffer.push_back(ptr);
-    time_buffer.push_back(last_timestamp_lidar);
+
+    push_lidar_cloud_with_interval(ptr, scan_start_time);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
@@ -1057,6 +1128,7 @@ int main(int argc, char** argv)
     nh.param<int>("preprocess/scan_line", p_pre->N_SCANS, 16);
     nh.param<int>("preprocess/timestamp_unit", p_pre->time_unit, US);
     nh.param<int>("preprocess/scan_rate", p_pre->SCAN_RATE, 10);
+    nh.param<double>("preprocess/lidar_split_interval", lidar_split_interval, 0.02);
     nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
     nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
     nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
@@ -1065,6 +1137,10 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
+    if (lidar_split_interval <= 0.0)
+    {
+        ROS_WARN("Invalid preprocess/lidar_split_interval(%.6f), disable lidar splitting.", lidar_split_interval);
+    }
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
     
     path.header.stamp    = ros::Time::now();
