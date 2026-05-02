@@ -108,7 +108,7 @@ double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
 double imu_lidar_time_tolerance = 0.005;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
-double lidar_split_interval = 0.02;
+int lidar_split_num = 1;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
 int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
 bool   point_selected_surf[100000] = {0};
@@ -249,28 +249,37 @@ void points_cache_collect()
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
 }
 
-void push_lidar_cloud_with_interval(const PointCloudXYZI::Ptr &cloud, const double scan_start_time)
+void push_lidar_cloud_with_split_num(const PointCloudXYZI::Ptr &cloud, const double scan_start_time)
 {
     if (cloud == nullptr || cloud->points.empty())
     {
         return;
     }
 
-    if (lidar_split_interval <= 0.0)
+    if (lidar_split_num <= 1)
     {
         lidar_buffer.push_back(cloud);
         time_buffer.push_back(scan_start_time);
+        last_timestamp_lidar = scan_start_time;
         return;
     }
 
-    const double split_interval_ms = lidar_split_interval * 1000.0;
     double max_offset_ms = 0.0;
     for (size_t i = 0; i < cloud->points.size(); ++i)
     {
         max_offset_ms = max(max_offset_ms, static_cast<double>(cloud->points[i].curvature));
     }
+    if (max_offset_ms <= 1e-6)
+    {
+        lidar_buffer.push_back(cloud);
+        time_buffer.push_back(scan_start_time);
+        last_timestamp_lidar = scan_start_time;
+        return;
+    }
 
-    const size_t segment_num = max<size_t>(1, static_cast<size_t>(max_offset_ms / split_interval_ms) + 1);
+    const size_t segment_num = static_cast<size_t>(lidar_split_num);
+    const double split_interval_ms = max_offset_ms / static_cast<double>(segment_num);
+    const double split_interval_s = split_interval_ms / 1000.0;
     vector<PointCloudXYZI::Ptr> segments(segment_num);
     for (size_t i = 0; i < segment_num; ++i)
     {
@@ -303,10 +312,11 @@ void push_lidar_cloud_with_interval(const PointCloudXYZI::Ptr &cloud, const doub
         segment_cloud->width = segment_cloud->points.size();
         segment_cloud->height = 1;
         lidar_buffer.push_back(segment_cloud);
-        time_buffer.push_back(scan_start_time + static_cast<double>(i) * lidar_split_interval);
-        last_timestamp_lidar = scan_start_time + static_cast<double>(i) * lidar_split_interval;
+        time_buffer.push_back(scan_start_time + static_cast<double>(i) * split_interval_s);
+        last_timestamp_lidar = scan_start_time + static_cast<double>(i) * split_interval_s;
     }
-    std::cout << "Split LiDAR cloud into " << segment_num << " segments, max offset: " << max_offset_ms << " ms, split interval: " << split_interval_ms << " ms." << std::endl;
+    std::cout << "Split LiDAR cloud into " << segment_num << " parts, max offset: " << max_offset_ms
+              << " ms, per-part interval: " << split_interval_ms << " ms." << std::endl;
     
 }
 
@@ -379,13 +389,17 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
     double scan_start_time = msg->header.stamp.toSec();
+    if (p_pre->lidar_type == HESAI && p_pre->scan_start_time > 0.0)
+    {
+        scan_start_time = p_pre->scan_start_time;
+    }
     if (scan_start_time < last_timestamp_lidar)
     {
         ROS_ERROR("lidar loop back, clear buffer");
         lidar_buffer.clear();
         time_buffer.clear();
     }
-    push_lidar_cloud_with_interval(ptr, scan_start_time);
+    push_lidar_cloud_with_split_num(ptr, scan_start_time);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
@@ -423,7 +437,7 @@ void livox_pcl_cbk(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
     PointCloudXYZI::Ptr  ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr, lio_mode);
 
-    push_lidar_cloud_with_interval(ptr, scan_start_time);
+    push_lidar_cloud_with_split_num(ptr, scan_start_time);
     
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
@@ -1159,7 +1173,7 @@ int main(int argc, char** argv)
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
     nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
-    nh.param<double>("common/lidar_split_interval", lidar_split_interval, 0.005);
+    nh.param<int>("common/lidar_split_num", lidar_split_num, 1);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
@@ -1184,9 +1198,10 @@ int main(int argc, char** argv)
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
-    if (lidar_split_interval <= 0.0)
+    if (lidar_split_num <= 0)
     {
-        ROS_WARN("Invalid preprocess/lidar_split_interval(%.6f), disable lidar splitting.", lidar_split_interval);
+        ROS_WARN("Invalid common/lidar_split_num(%d), disable lidar splitting.", lidar_split_num);
+        lidar_split_num = 1;
     }
     cout<<"p_pre->lidar_type "<<p_pre->lidar_type<<endl;
     
