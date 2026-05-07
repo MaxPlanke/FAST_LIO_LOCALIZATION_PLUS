@@ -267,7 +267,7 @@ bool ReLocalization::GicpMatch(const pcl::PointCloud<pcl::PointXYZINormal>::Ptr 
     gicp_.setInputTarget(local_map);
 
     pcl::PointCloud<pcl::PointXYZINormal>::Ptr aligned_source = boost::make_shared<pcl::PointCloud<pcl::PointXYZINormal>>();
-    gicp_.align(*aligned_source);
+    gicp_.align(*aligned_source, T);
 
     T = gicp_.getFinalTransformation();
     // if (gicp_.hasConverged()) {
