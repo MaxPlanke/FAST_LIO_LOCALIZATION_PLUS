@@ -17,11 +17,11 @@ ReLocalization::ReLocalization(const std::string& map_path):
 
     // set gicp param
     gicp_.setMaxCorrespondenceDistance(2);
-    gicp_.setMaximumIterations(100);
-    gicp_.setMaximumOptimizerIterations(100);
+    gicp_.setMaximumIterations(200);
+    gicp_.setMaximumOptimizerIterations(200);
     // gicp_.setRANSACIterations(100);
     // gicp_.setRANSACOutlierRejectionThreshold(1.0);
-    gicp_.setTransformationEpsilon(1e-5);
+    gicp_.setTransformationEpsilon(1e-8);
     gicp_.setEuclideanFitnessEpsilon(1e-12);
     // gicp_.setUseReciprocalCorrespondences(false);
 

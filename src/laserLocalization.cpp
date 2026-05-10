@@ -102,6 +102,8 @@ static bool ensureDirectory(const string &path)
     return false;
 }
 
+
+
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
@@ -161,6 +163,9 @@ shared_ptr<ImuProcess> p_imu(new ImuProcess());
 ros::Publisher pub_signal;
 ros::Publisher pubImuPropOdom;
 
+
+
+
 /*** IMU propagation state for high-frequency pose output ***/
 struct ImuPropState {
     M3D rot = M3D::Identity();
@@ -182,6 +187,10 @@ double latest_ekf_time = 0;
 sensor_msgs::Imu newest_imu;
 deque<sensor_msgs::Imu> prop_imu_buffer;
 nav_msgs::Odometry imu_prop_odom;
+
+
+
+
 
 void SigHandle(int sig)
 {
@@ -267,6 +276,50 @@ void points_cache_collect()
     PointVector points_history;
     ikdtree.acquire_removed_points(points_history);
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
+}
+
+
+void publish_frame_world(const ros::Publisher & pubLaserCloudFull)
+{
+    if(scan_pub_en)
+    {
+        PointCloudXYZI::Ptr laserCloudFullRes(feats_undistort);
+        int size = laserCloudFullRes->points.size();
+        PointCloudXYZI::Ptr laserCloudWorld( \
+                        new PointCloudXYZI(size, 1));
+
+        for (int i = 0; i < size; i++)
+        {
+            RGBpointBodyToWorld(&laserCloudFullRes->points[i], \
+                                &laserCloudWorld->points[i]);
+        }
+
+        sensor_msgs::PointCloud2 laserCloudmsg;
+        pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
+        laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+        laserCloudmsg.header.frame_id = "map";
+        pubLaserCloudFull.publish(laserCloudmsg);
+        publish_count -= PUBFRAME_PERIOD;
+    }
+}
+
+void publish_frame_body(const ros::Publisher & pubLaserCloudFull_body)
+{
+    int size = feats_undistort->points.size();
+    PointCloudXYZI::Ptr laserCloudIMUBody(new PointCloudXYZI(size, 1));
+
+    for (int i = 0; i < size; i++)
+    {
+        RGBpointBodyLidarToIMU(&feats_undistort->points[i], \
+                            &laserCloudIMUBody->points[i]);
+    }
+
+    sensor_msgs::PointCloud2 laserCloudmsg;
+    pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
+    laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
+    laserCloudmsg.header.frame_id = "body";
+    pubLaserCloudFull_body.publish(laserCloudmsg);
+    publish_count -= PUBFRAME_PERIOD;
 }
 
 BoxPointType LocalMap_Points;
@@ -639,7 +692,7 @@ void PublishLocalization(const ros::Publisher &pubGlobalization,
                          const Eigen::Matrix4f &estimation_pose) {
     nav_msgs::Odometry global_localization;
     global_localization.header.frame_id = "map";
-    global_localization.child_frame_id = "local_map";
+    global_localization.child_frame_id = "lidar";
     global_localization.header.stamp = ros::Time().fromSec(lidar_end_time);// ros::Time().fromSec(lidar_end_time);
 
     global_localization.pose.pose.position.x = estimation_pose(0,3);
@@ -685,7 +738,14 @@ void PublishLocalization(const ros::Publisher &pubGlobalization,
     q.setY(global_localization.pose.pose.orientation.y);
     q.setZ(global_localization.pose.pose.orientation.z);
     transform.setRotation( q );
-    br.sendTransform( tf::StampedTransform( transform, global_localization.header.stamp, "map", "local_map" ) );
+
+    tf::StampedTransform stamped_transform(
+        transform,
+        ros::Time::now(),
+        "map",
+        "lidar"
+    );
+    br.sendTransform(stamped_transform);
 }
 
 void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_data)
@@ -904,6 +964,11 @@ int main(int argc, char** argv)
     /*** ROS subscribe initialization ***/
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? nh.subscribe(lid_topic, 200000, livox_pcl_cbk) : nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
+
+    ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>
+            ("/cloud_registered", 100000);
+    ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>
+            ("/cloud_registered_body", 100000);
 //------------------------------------------------------------------------------------------------------
     signal(SIGINT, SigHandle);
     #if 1
@@ -1103,46 +1168,31 @@ int main(int argc, char** argv)
                 map_incremental();
                 t5 = omp_get_wtime();
 
-                Eigen::Quaternionf q_u(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z);
-                estimation_pose.block<3,3>(0,0) = q_u.normalized().toRotationMatrix();
-                estimation_pose(0,3) = state_point.pos[0];
-                estimation_pose(1,3) = state_point.pos[1];
-                estimation_pose(2,3) = state_point.pos[2];
+                // Eigen::Quaternionf q_u(geoQuat.w, geoQuat.x, geoQuat.y, geoQuat.z);
+                // estimation_pose.block<3,3>(0,0) = q_u.normalized().toRotationMatrix();
+                // estimation_pose(0,3) = state_point.pos[0];
+                // estimation_pose(1,3) = state_point.pos[1];
+                // estimation_pose(2,3) = state_point.pos[2];
 
-                Eigen::Vector3f angle = estimation_pose.block<3,3>(0,0).eulerAngles(2,1,0)*(180.0 / M_PI);
-                file_u       << state_point.pos[0] << "," 
-                             << state_point.pos[1] << ","   
-                             << state_point.pos[2] << ","
-                             << angle[0]         << "," 
-                             << angle[1]         << ","   
-                             << angle[2] << "\n";
+                // Eigen::Vector3f angle = estimation_pose.block<3,3>(0,0).eulerAngles(2,1,0)*(180.0 / M_PI);
+                // file_u       << state_point.pos[0] << "," 
+                //              << state_point.pos[1] << ","   
+                //              << state_point.pos[2] << ","
+                //              << angle[0]         << "," 
+                //              << angle[1]         << ","   
+                //              << angle[2] << "\n";
 
 
                 // pure_localization_->TestFovMap(estimation_pose, feats_undistort);
 
-                // Convert point cloud from Lidar frame to IMU frame before publishing
-                sensor_msgs::PointCloud2 show;
-                pcl::PointCloud<PointType> feats_in_imu;
-                feats_in_imu.reserve(feats_undistort->size());
-                
-                for (const auto &pt : feats_undistort->points) {
-                    PointType pt_imu;
-                    Eigen::Vector3d pt_lidar(pt.x, pt.y, pt.z);
-                    // Transform from Lidar to IMU: P_imu = R_L_I * P_lidar + T_L_I
-                    Eigen::Vector3d pt_imu_vec = state_point.offset_R_L_I * pt_lidar + state_point.offset_T_L_I;
-                    pt_imu.x = pt_imu_vec(0);
-                    pt_imu.y = pt_imu_vec(1);
-                    pt_imu.z = pt_imu_vec(2);
-                    pt_imu.intensity = pt.intensity;
-                    feats_in_imu.push_back(pt_imu);
-                }
-                
-                pcl::toROSMsg(feats_in_imu, show);
-                show.header.frame_id = "local_map";  // IMU frame (body frame)
-                pub_local_map.publish(show);
 
                 /******* Publish odometry *******/
                 PublishLocalization(pubGlobalLocalization, estimation_pose);
+                
+                /******* Publish points *******/
+                // if (path_en)                         publish_path(pubPath);
+                publish_frame_world(pubLaserCloudFull);
+                // if (scan_pub_en && scan_body_pub_en) publish_frame_body(pubLaserCloudFull_body);
 
                 /******* Save EKF state for IMU propagation *******/
                 {
