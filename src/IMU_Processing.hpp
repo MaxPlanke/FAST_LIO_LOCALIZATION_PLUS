@@ -29,7 +29,7 @@
 constexpr int FLOAT_MIN = 0;
 constexpr int FLOAT_MAX = 1;
 
-#define MAX_INI_COUNT (10)
+#define MAX_INI_COUNT (50)
 
 const bool time_list(PointType &x, PointType &y) {return (x.curvature < y.curvature);};
 

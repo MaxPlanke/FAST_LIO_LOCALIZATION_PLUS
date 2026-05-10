@@ -1507,21 +1507,25 @@ int main(int argc, char** argv)
 
             state_point = kf.get_x();
 
-            // Compute gravity-aligned frame transform once EKF is initialized
-            if (!b_q_Grav_w_caclulated && flg_EKF_inited)
+            // jianping, calculate q_Grav_w
+            if(!b_q_Grav_w_caclulated)
             {
-                V3D grav_w(state_point.grav[0], state_point.grav[1], state_point.grav[2]);
-                if (grav_w.norm() > 1e-6)
+                Eigen::Vector3d gravVec(state_point.grav[0],state_point.grav[1],state_point.grav[2]);
+                if (!p_imu->imu_init_done())
                 {
-                    V3D up_w = -grav_w.normalized(); // upward direction in world frame
-                    Eigen::Vector3d z_g(0.0, 0.0, 1.0);
-                    q_Grav_w = Eigen::Quaterniond::FromTwoVectors(up_w, z_g);
-                    G_T_I0 = Eigen::Matrix4d::Identity();
-                    G_T_I0.block<3, 3>(0, 0) = q_Grav_w.toRotationMatrix();
-                    b_q_Grav_w_caclulated = true;
-                    ROS_INFO("Gravity-aligned frame computed. grav_w = [%.3f, %.3f, %.3f]",
-                             grav_w(0), grav_w(1), grav_w(2));
+                    ROS_WARN("IMU initialization not finished, skip this scan!\n");
+                    continue;
                 }
+                G_T_I0.setIdentity();
+                // V3D euler_ = RotMtoEuler(Quaterniond::FromTwoVectors(gravVec.normalized(), Eigen::Vector3d(0,0,-1)).toRotationMatrix());
+                // euler_.z() = 0.0;
+                // G_T_I0.block<3,3>(0,0) = EulerToRotM(euler_);
+
+                q_Grav_w = G_T_I0.block<3,3>(0,0);
+
+                std::cout<<"q_Grav_w: " << q_Grav_w.coeffs()<<"\n";
+                ROS_WARN("gravVec: %f, %f, %f", state_point.grav[0],state_point.grav[1],state_point.grav[2]);
+                b_q_Grav_w_caclulated = true;
             }
 
             Eigen::Quaternionf qq(state_point.rot.coeffs()[3], state_point.rot.coeffs()[0], state_point.rot.coeffs()[1], state_point.rot.coeffs()[2]);
