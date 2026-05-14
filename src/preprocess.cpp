@@ -1,6 +1,6 @@
 #include "preprocess.h"
 #include <limits>
-
+#include <omp.h>
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
 
@@ -88,6 +88,11 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   case HESAI:
     hesai_handler(msg);
     break;
+
+  // CASE FMCW:
+  case FMCW:
+    FMCW_handler(msg);
+    break;
   
   default:
     printf("Error LiDAR Type");
@@ -95,6 +100,47 @@ void Preprocess::process(const sensor_msgs::PointCloud2::ConstPtr &msg, PointClo
   }
   *pcl_out = pl_surf;
 }
+
+// 增加了 FMCW雷达的点云处理函数
+void Preprocess::FMCW_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
+{
+  pl_surf.clear();
+  pl_corn.clear();
+  pl_full.clear();
+
+  pcl::PointCloud<fmcw_ros::PointXYZV> pl_lightic;
+  pcl::fromROSMsg(*msg, pl_lightic);
+
+  int plsize = pl_lightic.size();
+  pl_corn.reserve(plsize);
+  pl_surf.reserve(plsize);
+
+  for (int i = 0; i < static_cast<int>(pl_lightic.size()); i++)
+  {
+    if (i % point_filter_num != 0) continue;
+
+    const auto &src = pl_lightic.points[i];
+    double range = src.x * src.x + src.y * src.y + src.z * src.z;
+    if (range < (blind* blind)) continue;
+
+    PointType added_pt;
+    added_pt.x = src.x;
+    added_pt.y = src.y;
+    added_pt.z = src.z;
+    added_pt.intensity = src.intensity;
+
+    added_pt.normal_x = src.v; // Doppler
+    added_pt.normal_y = 0.0;
+    added_pt.normal_z = 0.0;
+
+    added_pt.curvature = static_cast<float>(src.timestamp * 1000.0); // timestamp unit: ms
+
+    pl_full.push_back(added_pt);
+    pl_surf.push_back(added_pt);
+  }
+}
+
+
 
 void Preprocess::avia_handler(const livox_ros_driver2::CustomMsg::ConstPtr &msg)
 {

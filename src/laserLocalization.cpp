@@ -107,7 +107,7 @@ static bool ensureDirectory(const string &path)
 double res_mean_last = 0.05, total_residual = 0.0;
 double last_timestamp_lidar = 0, last_timestamp_imu = -1.0;
 double gyr_cov = 0.1, acc_cov = 0.1, b_gyr_cov = 0.0001, b_acc_cov = 0.0001;
-double imu_lidar_time_tolerance = 0.005;
+// double imu_lidar_time_tolerance = 0.005;
 double filter_size_corner_min = 0, filter_size_surf_min = 0, filter_size_map_min = 0, fov_deg = 0;
 double cube_len = 0, HALF_FOV_COS = 0, FOV_DEG = 0, total_distance = 0, lidar_end_time = 0, first_lidar_time = 0.0;
 int    effct_feat_num = 0, time_log_counter = 0, scan_count = 0, publish_count = 0;
@@ -435,6 +435,18 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
 
+    // Convert gyro from degrees to radians for FMCW lidar
+    if (p_pre->lidar_type == FMCW)
+    {
+        msg->angular_velocity.x = -msg_in->angular_velocity.y;// / 180.0 * M_PI;
+        msg->angular_velocity.y = -msg_in->angular_velocity.x;// / 180.0 * M_PI;
+        msg->angular_velocity.z = -msg_in->angular_velocity.z;// / 180.0 * M_PI;
+
+        msg->linear_acceleration.x = -msg_in->linear_acceleration.y / G_m_s2;
+        msg->linear_acceleration.y = -msg_in->linear_acceleration.x / G_m_s2;
+        msg->linear_acceleration.z = -msg_in->linear_acceleration.z / G_m_s2;
+    }
+
     msg->header.stamp = ros::Time().fromSec(msg_in->header.stamp.toSec() - time_diff_lidar_to_imu);
     if (abs(timediff_lidar_wrt_imu) > 0.1 && time_sync_en)
     {
@@ -597,16 +609,16 @@ bool sync_packages(MeasureGroup &meas)
         imu_buffer.pop_front();
     }
 
-    if (meas.imu.empty() && !imu_buffer.empty())
-    {
-        double first_imu_time = imu_buffer.front()->header.stamp.toSec();
-        if (first_imu_time >= lidar_end_time &&
-            first_imu_time - lidar_end_time <= imu_lidar_time_tolerance)
-        {
-            meas.imu.push_back(imu_buffer.front());
-            imu_buffer.pop_front();
-        }
-    }
+    // if (meas.imu.empty() && !imu_buffer.empty())
+    // {
+    //     double first_imu_time = imu_buffer.front()->header.stamp.toSec();
+    //     if (first_imu_time >= lidar_end_time &&
+    //         first_imu_time - lidar_end_time <= imu_lidar_time_tolerance)
+    //     {
+    //         meas.imu.push_back(imu_buffer.front());
+    //         imu_buffer.pop_front();
+    //     }
+    // }
 
     if (meas.imu.empty())
     {
@@ -886,7 +898,7 @@ int main(int argc, char** argv)
     nh.param<string>("common/imu_topic", imu_topic,"/livox/imu");
     nh.param<bool>("common/time_sync_en", time_sync_en, false);
     nh.param<double>("common/time_offset_lidar_to_imu", time_diff_lidar_to_imu, 0.0);
-    nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
+    // nh.param<double>("common/imu_lidar_time_tolerance", imu_lidar_time_tolerance, 0.005);
     nh.param<double>("filter_size_corner",filter_size_corner_min,0.5);
     nh.param<double>("filter_size_surf",filter_size_surf_min,0.5);
     nh.param<double>("filter_size_map",filter_size_map_min,0.5);
@@ -988,6 +1000,10 @@ int main(int argc, char** argv)
         ros::Publisher pubGlobalLocalization= nh.advertise<nav_msgs::Odometry> ("/global_localization", 100000);
         ros::Publisher pub_map = nh.advertise<sensor_msgs::PointCloud2> ("/pcl_map", 1, true);
         ros::Publisher pub_local_map = nh.advertise<sensor_msgs::PointCloud2> ("/local_map", 1);
+
+        // For visualization only, publish the local map in world frame (2026/05/13)
+        ros::Publisher pub_local_map_world = nh.advertise<sensor_msgs :: PointCloud2> ("/local_map_world", 1);
+
         pub_signal = nh.advertise<std_msgs::String> ("/signal", 1);
         pubImuPropOdom = nh.advertise<nav_msgs::Odometry>("/imu_prop_odom", 100000);
         ros::Timer imu_prop_timer = nh.createTimer(ros::Duration(0.002), imu_prop_callback); // 500Hz timer
@@ -1185,6 +1201,41 @@ int main(int argc, char** argv)
 
                 // pure_localization_->TestFovMap(estimation_pose, feats_undistort);
 
+                // Convert point cloud from Lidar frame to IMU frame before publishing
+                sensor_msgs::PointCloud2 show;
+                pcl::PointCloud<PointType> feats_in_imu;
+                feats_in_imu.reserve(feats_undistort->size());
+                
+                for (const auto &pt : feats_undistort->points) {
+                    PointType pt_imu;
+                    Eigen::Vector3d pt_lidar(pt.x, pt.y, pt.z);
+                    // Transform from Lidar to IMU: P_imu = R_L_I * P_lidar + T_L_I
+                    Eigen::Vector3d pt_imu_vec = state_point.offset_R_L_I * pt_lidar + state_point.offset_T_L_I;
+                    pt_imu.x = pt_imu_vec(0);
+                    pt_imu.y = pt_imu_vec(1);
+                    pt_imu.z = pt_imu_vec(2);
+                    pt_imu.intensity = pt.intensity;
+                    feats_in_imu.push_back(pt_imu);
+                }
+                
+                pcl::toROSMsg(feats_in_imu, show);
+
+                // 保留原来的 /local_map 发布，但改成 IMU frame， 补齐时间戳，方便后续使用 
+                show.header.stamp = ros::Time().fromSec(lidar_end_time); // 2026/05/13
+                show.header.frame_id = "local_map";  // IMU frame (body frame)
+                pub_local_map.publish(show);
+
+                // For visualization only, publish the local map in world frame (2026/05/13)
+                sensor_msgs::PointCloud2 show_world;
+                PointCloudXYZI::Ptr laserCloudWorld(new PointCloudXYZI(feats_undistort->points.size(), 1));
+                for (size_t i=0; i < feats_undistort->points.size(); ++i)
+                {
+                    RGBpointBodyToWorld(&feats_undistort->points[i], &laserCloudWorld->points[i]);
+                }
+                pcl::toROSMsg(*laserCloudWorld, show_world);
+                show_world.header.stamp = ros :: Time().fromSec(lidar_end_time);
+                show_world.header.frame_id = "map"; // world frame
+                pub_local_map_world.publish(show_world);
 
                 /******* Publish odometry *******/
                 PublishLocalization(pubGlobalLocalization, estimation_pose);

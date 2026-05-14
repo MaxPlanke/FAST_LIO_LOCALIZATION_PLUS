@@ -1,0 +1,37 @@
+common:
+    lid_topic:  "/lightic_points"
+    imu_topic:  "/cowbimu/data"
+    time_sync_en: false
+    time_offset_lidar_to_imu: 0.0
+    # imu_lidar_time_tolerance: 0.005
+
+preprocess:
+    lidar_type: 5
+    scan_line: 40
+    blind: 0.3
+    timestamp_unit: 2
+    scan_rate: 10
+
+mapping:
+    acc_cov: 0.1
+    gyr_cov: 0.01
+    b_acc_cov: 0.001
+    b_gyr_cov: 0.001
+    fov_degree: 360
+    det_range: 100.0
+    extrinsic_est_en: false
+    extrinsic_T: [0.0, 0.0, 0.0]
+    extrinsic_R: [1, 0, 0,
+                  0, 1, 0,
+                  0, 0, 1]
+
+publish:
+    path_en: false
+    scan_publish_en: true
+    dense_publish_en: true
+    scan_bodyframe_pub_en: true
+
+pcd_save:
+    pcd_save_en: false
+    interval: -1
+

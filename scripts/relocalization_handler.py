@@ -22,11 +22,24 @@ class RelocalizationHandler:
     def kill_fastlio_node(self):
         """Kill the fastlio_localization node if it exists"""
         try:
-            # Find and kill the fastlio_localization process
-            result = subprocess.run(['pkill', '-f', 'fastlio_localization'], 
-                                  capture_output=True, text=True)
+            # Prefer ROS-level node shutdown first to avoid broad process matching.
+            node_kill = subprocess.run(
+                ['rosnode', 'kill', '/fastlio_localization'],
+                capture_output=True, text=True
+            )
+            if node_kill.returncode == 0:
+                rospy.loginfo("Successfully killed /fastlio_localization via rosnode kill")
+                time.sleep(1)
+                return
+
+            # Fallback: use a precise executable pattern, not generic 'fastlio_localization',
+            # to avoid killing unrelated processes (e.g., editors with workspace path in argv).
+            result = subprocess.run(
+                ['pkill', '-f', '/devel/lib/fast_lio/fastlio_localization'],
+                capture_output=True, text=True
+            )
             if result.returncode == 0:
-                rospy.loginfo("Successfully killed fastlio_localization node")
+                rospy.loginfo("Successfully killed fastlio_localization process via precise pkill")
                 time.sleep(1)  # Wait for process to fully terminate
             else:
                 rospy.logwarn("No fastlio_localization process found to kill")
